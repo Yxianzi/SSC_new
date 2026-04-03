@@ -34,8 +34,8 @@ def main():
     cfg.ssc_guide_eps = 1e-2
     cfg.target_warmup_epochs = max(cfg.epochs // 3, 1)
     cfg.target_ramp_epochs = 10
-    cfg.prototype_attention_start_epoch = max((cfg.epochs * 8) // 10, 1)
-    cfg.target_contrastive_start_epoch = max((cfg.epochs * 9) // 10, 1)
+    cfg.prototype_attention_start_epoch = cfg.target_warmup_epochs + 5  # 约 38
+    cfg.target_contrastive_start_epoch = cfg.target_warmup_epochs + 5
     cfg.prototype_attention_ramp_epochs = 20
     cfg.prototype_attention_max_scale = 0.20
     cfg.target_contrastive_min_weight = 0.90
