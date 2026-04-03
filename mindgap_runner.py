@@ -436,36 +436,41 @@ def run_mindgap_experiment(data_s, label_s, data_t, label_t, config):
                     pseudo_info['labels'],
                     target_sample_weights,
                 )
+                # 提取平滑的 target_prob 供 LMMD 使用
                 student_target_prob = torch.nn.functional.softmax(target_alignment_outputs['logits'], dim=1)
 
                 lmmd_loss = mmd.weighted_lmmd(
                     source_outputs['features'],
                     target_alignment_outputs['features'],
                     source_label,
-                    student_target_prob,  # 弃用被 EMA 教师延迟影响的概率
-                    target_weights=None,  # 修复 2：传入 None，使全体目标域样本都参与分布对齐，不被置信度阈值拦截
+                    student_target_prob,
+                    target_weights=None,
                     CLASS_NUM=class_num,
                 )
                 lambd = 2 / (1 + math.exp(-10 * epoch / epochs)) - 1
                 scaled_target_contrastive_loss = (
                         target_contrastive_scale * target_contrastive_weight * target_contrastive_loss
                 )
-                scaled_pseudo_classification_loss = target_loss_scale * pseudo_loss_weight * pseudo_classification_loss
 
-                # 修复 3：解除 target_loss_scale 的强制 0 拦截，让 lambd 曲线正常控制对齐权重的自然上升
+                # ================= 核心修复：切断伪标签的直接 CE 惩罚，防止多数类崩塌 =================
+                # 直接将目标域交叉熵损失置 0，仅让伪标签通过上方的 target_contrastive_loss 生效
+                scaled_pseudo_classification_loss = torch.zeros_like(classification_loss)
+                # ==============================================================================
+
                 scaled_lmmd_loss = lmmd_weight * lambd * lmmd_loss
+
                 total_loss = (
-                    classification_loss
-                    + source_contrastive_loss
-                    + scaled_target_contrastive_loss
-                    + scaled_pseudo_classification_loss
-                    + scaled_lmmd_loss
-                    + current_spectral_weight * source_outputs['spectral_reg']
+                        classification_loss
+                        + source_contrastive_loss
+                        + scaled_target_contrastive_loss
+                        + scaled_lmmd_loss
+                        + current_spectral_weight * source_outputs['spectral_reg']
                 )
 
                 optimizer.zero_grad()
                 total_loss.backward()
                 optimizer.step()
+
                 update_ema(model, teacher, momentum=teacher_momentum)
 
                 pred = source_outputs['logits'].data.max(1)[1]

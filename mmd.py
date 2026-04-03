@@ -92,20 +92,22 @@ def lmmd(source, target, s_label, t_label, kernel_mul=2.0, kernel_num=5, fix_sig
 
 
 def weighted_lmmd(
-    source,
-    target,
-    s_label,
-    t_prob,
-    target_weights=None,
-    kernel_mul=2.0,
-    kernel_num=5,
-    fix_sigma=None,
-    CLASS_NUM=7,
+        source,
+        target,
+        s_label,
+        t_prob,
+        target_weights=None,
+        kernel_mul=2.0,
+        kernel_num=5,
+        fix_sigma=None,
+        CLASS_NUM=7,
 ):
-    batch_size = source.size(0)
+    s_batch = source.size(0)
+    t_batch = target.size(0)
     device = source.device
 
-    if batch_size == 0:
+    # 维度安全保护
+    if s_batch == 0 or t_batch == 0:
         return torch.zeros((), device=device, dtype=source.dtype)
 
     source_one_hot = F.one_hot(s_label.view(-1), num_classes=CLASS_NUM).float().to(device)
@@ -114,7 +116,7 @@ def weighted_lmmd(
 
     target_prob = t_prob.float().to(device)
     if target_weights is None:
-        target_weights = torch.ones(batch_size, device=device, dtype=source.dtype)
+        target_weights = torch.ones(t_batch, device=device, dtype=source.dtype)
     else:
         target_weights = target_weights.float().to(device)
     target_weights = target_weights.clamp(min=0.0).view(-1, 1)
@@ -123,7 +125,14 @@ def weighted_lmmd(
     target_class_mass = target_prob.sum(dim=0, keepdim=True).clamp(min=1e-6)
     target_norm = target_prob / target_class_mass
 
-    valid_classes = (source_one_hot.sum(dim=0) > 0) & (target_prob.sum(dim=0) > 0)
+    # ================= 核心修复：使用 Hard Label 过滤无效的噪声类别 =================
+    target_hard_labels = target_prob.argmax(dim=1)
+    target_hard_one_hot = F.one_hot(target_hard_labels, num_classes=CLASS_NUM).float()
+
+    # 只有在 Source 批次和 Target 批次(硬预测)中同时存在的类别，才计算 MMD 距离
+    valid_classes = (source_one_hot.sum(dim=0) > 0) & (target_hard_one_hot.sum(dim=0) > 0)
+    # =========================================================================
+
     if valid_classes.sum() == 0:
         return torch.zeros((), device=device, dtype=source.dtype)
 
@@ -142,9 +151,11 @@ def weighted_lmmd(
     if torch.isnan(kernels).any():
         return torch.zeros((), device=device, dtype=source.dtype)
 
-    SS = kernels[:batch_size, :batch_size]
-    TT = kernels[batch_size:, batch_size:]
-    ST = kernels[:batch_size, batch_size:]
+    # 动态切片，防止 source 和 target 的 batch_size 不同导致维度崩溃
+    SS = kernels[:s_batch, :s_batch]
+    TT = kernels[s_batch:, s_batch:]
+    ST = kernels[:s_batch, s_batch:]
+
     return torch.sum(weight_ss * SS + weight_tt * TT - 2 * weight_st * ST)
 
 def mmd_linear(f_of_X, f_of_Y):
