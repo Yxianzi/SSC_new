@@ -43,12 +43,11 @@ def _set_ssc_trainable(model, trainable):
         parameter.requires_grad = trainable
 
 
-def _build_optimizer(model, base_lr, momentum, weight_decay, ssc_lr_scale, ssc_trainable):
+def _build_optimizer(model, base_lr, momentum, weight_decay):
     other_params = []
     ssc_params = []
     for name, parameter in model.named_parameters():
-        if not parameter.requires_grad:
-            continue
+        # 这里不要使用 requires_grad 判断，把所有参数都加进优化器，方便后续动态调整
         if name.startswith('ssc.'):
             ssc_params.append(parameter)
         else:
@@ -58,11 +57,10 @@ def _build_optimizer(model, base_lr, momentum, weight_decay, ssc_lr_scale, ssc_t
     if ssc_params:
         param_groups.append({
             'params': ssc_params,
-            'lr': base_lr * ssc_lr_scale if ssc_trainable else 0.0,
+            'lr': 0.0, # 初始化时设为 0，在 epoch 循环内动态调整
         })
 
     return torch.optim.SGD(param_groups, lr=base_lr, momentum=momentum, weight_decay=weight_decay)
-
 
 def _spectral_weight(epoch, epochs, ssc_unfreeze_epoch, spectral_reg_weight):
     if epoch < ssc_unfreeze_epoch:
@@ -207,8 +205,9 @@ def run_mindgap_experiment(data_s, label_s, data_t, label_t, config):
         trainX, trainY = utils.get_sample_data(data_s, label_s, cfg.HalfWidth, source_samples_per_class)
         testID, testX, testY, G, RandPerm, Row, Column = utils.get_all_data(data_t, label_t, cfg.HalfWidth)
 
-        train_dataset = TensorDataset(torch.tensor(trainX), torch.tensor(trainY))
-        test_dataset = TensorDataset(torch.tensor(testX), torch.tensor(testY))
+        # 使用 torch.from_numpy() 替代 torch.tensor()，并显式指定最终的类型
+        train_dataset = TensorDataset(torch.from_numpy(trainX).float(), torch.from_numpy(trainY).long())
+        test_dataset = TensorDataset(torch.from_numpy(testX).float(), torch.from_numpy(testY).long())
 
         train_loader_s = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
         train_loader_t = DataLoader(test_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
@@ -232,6 +231,14 @@ def run_mindgap_experiment(data_s, label_s, data_t, label_t, config):
             fallback_topk=pseudo_fallback_topk,
             fallback_min_weight=pseudo_min_weight,
             enable_distribution_alignment=enable_distribution_alignment,
+        )
+
+        optimizer = _build_optimizer(
+            model,
+            cfg.lr,
+            cfg.momentum,
+            cfg.l2_decay,
+
         )
 
         print("Training...")
@@ -259,14 +266,12 @@ def run_mindgap_experiment(data_s, label_s, data_t, label_t, config):
                 prototype_attention_ramp_epochs,
             )
             _set_ssc_trainable(model, ssc_trainable)
-            optimizer = _build_optimizer(
-                model,
-                learning_rate,
-                cfg.momentum,
-                cfg.l2_decay,
-                ssc_lr_scale,
-                ssc_trainable,
-            )
+            # -----------------------------------------------------------------
+            # 新增：动态更新优化器内部的学习率，彻底删除这里重新实例化 optimizer 的代码
+            optimizer.param_groups[0]['lr'] = learning_rate
+            if len(optimizer.param_groups) > 1:
+                optimizer.param_groups[1]['lr'] = learning_rate * ssc_lr_scale if ssc_trainable else 0.0
+            # -----------------------------------------------------------------
             current_spectral_weight = _spectral_weight(epoch, epochs, ssc_unfreeze_epoch, spectral_reg_weight)
 
             model.train()
@@ -431,20 +436,24 @@ def run_mindgap_experiment(data_s, label_s, data_t, label_t, config):
                     pseudo_info['labels'],
                     target_sample_weights,
                 )
+                student_target_prob = torch.nn.functional.softmax(target_alignment_outputs['logits'], dim=1)
+
                 lmmd_loss = mmd.weighted_lmmd(
                     source_outputs['features'],
                     target_alignment_outputs['features'],
                     source_label,
-                    pseudo_info['probabilities'].detach(),
-                    target_weights=target_sample_weights.detach(),
+                    student_target_prob,  # 弃用被 EMA 教师延迟影响的概率
+                    target_weights=None,  # 修复 2：传入 None，使全体目标域样本都参与分布对齐，不被置信度阈值拦截
                     CLASS_NUM=class_num,
                 )
                 lambd = 2 / (1 + math.exp(-10 * epoch / epochs)) - 1
                 scaled_target_contrastive_loss = (
-                    target_contrastive_scale * target_contrastive_weight * target_contrastive_loss
+                        target_contrastive_scale * target_contrastive_weight * target_contrastive_loss
                 )
                 scaled_pseudo_classification_loss = target_loss_scale * pseudo_loss_weight * pseudo_classification_loss
-                scaled_lmmd_loss = target_loss_scale * lmmd_weight * lambd * lmmd_loss
+
+                # 修复 3：解除 target_loss_scale 的强制 0 拦截，让 lambd 曲线正常控制对齐权重的自然上升
+                scaled_lmmd_loss = lmmd_weight * lambd * lmmd_loss
                 total_loss = (
                     classification_loss
                     + source_contrastive_loss
@@ -522,7 +531,9 @@ def run_mindgap_experiment(data_s, label_s, data_t, label_t, config):
             best_labels = np.array([], dtype=np.int64)
             best_predict = np.array([], dtype=np.int64)
         if best_labels.size > 0:
-            C = metrics.confusion_matrix(best_labels, best_predict)
+            C = metrics.confusion_matrix(best_labels, best_predict, labels=np.arange(class_num))
+            row_sum = np.sum(C, 1, dtype=np.float64)
+            row_sum[row_sum == 0] = 1e-12
             A[iDataSet, :] = np.diag(C) / np.sum(C, 1, dtype=np.float64)
             k[iDataSet] = metrics.cohen_kappa_score(best_labels, best_predict)
 
