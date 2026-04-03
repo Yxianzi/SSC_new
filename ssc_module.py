@@ -97,11 +97,8 @@ class SpectralStyleCalibration(nn.Module):
         return normalized, mean, std
 
     def _domain_statistics(self, x, domain=None):
-        if bool(self.has_global_stats.item()) and domain in ('source', 'target'):
-            if domain == 'source':
-                return self.source_stats_vector
-            return self.target_stats_vector
-
+        # 修正：删除 if bool(self.has_global_stats.item()) 的全局拦截逻辑
+        # 强制按当前 Batch 计算统计量，使得 condition_net 能产生动态梯度
         flattened = x.permute(1, 0, 2, 3).reshape(x.size(1), -1)
         mean = flattened.mean(dim=1)
         std = flattened.std(dim=1, unbiased=False).clamp(min=1e-5)

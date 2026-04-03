@@ -113,10 +113,15 @@ class RobustPseudoLabelEngine:
         return adjusted
 
     def _classwise_thresholds(self):
+        # 修正：归一化进度，进度越高的类置信度越足
         normalized_progress = self.classwise_progress / self.classwise_progress.max().clamp(min=1e-6)
-        class_frequency = self.running_class_distribution / self.running_class_distribution.mean().clamp(min=1e-6)
-        balance_factor = torch.sqrt(class_frequency.clamp(min=1e-6))
-        thresholds = self.base_threshold * normalized_progress * balance_factor
+
+        # 修正：放弃反向惩罚大类的 balance_factor
+        # 逻辑改为：对于模型还不自信的类（progress 低），主动降低其伪标签阈值以鼓励探索
+        # 对于已经自信的类，保持较高的 base_threshold 确保质量
+        dynamic_scale = 1.0 - 0.2 * (1.0 - normalized_progress)
+
+        thresholds = self.base_threshold * dynamic_scale
         return thresholds.clamp(min=self.min_threshold, max=self.max_threshold)
 
     def generate(self, teacher_probabilities, uncertainty=None):

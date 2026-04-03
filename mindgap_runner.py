@@ -444,9 +444,10 @@ def run_mindgap_experiment(data_s, label_s, data_t, label_t, config):
                     target_alignment_outputs['features'],
                     source_label,
                     student_target_prob,
-                    target_weights=None,
+                    target_weights=None,  # 必须为 None
                     CLASS_NUM=class_num,
                 )
+
                 lambd = 2 / (1 + math.exp(-10 * epoch / epochs)) - 1
                 scaled_target_contrastive_loss = (
                         target_contrastive_scale * target_contrastive_weight * target_contrastive_loss
@@ -463,6 +464,7 @@ def run_mindgap_experiment(data_s, label_s, data_t, label_t, config):
                         classification_loss
                         + source_contrastive_loss
                         + scaled_target_contrastive_loss
+                        + scaled_pseudo_classification_loss
                         + scaled_lmmd_loss
                         + current_spectral_weight * source_outputs['spectral_reg']
                 )
